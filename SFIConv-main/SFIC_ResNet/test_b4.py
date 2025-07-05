@@ -461,7 +461,7 @@ def main():
     
     # 基本参数
     parser.add_argument('--test_txt_path', type=str, 
-                       default='/home/zqc/FaceForensics++/c23/test.txt',
+                       default='/home/zqc/WDF/test.txt',
                        help='Test data txt path')
     parser.add_argument('--model_path', type=str, 
                        default='./output/efficientnet-b4-enhanced/best.pkl',
