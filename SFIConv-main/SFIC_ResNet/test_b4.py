@@ -1,4 +1,4 @@
-# test_b4.py - 专门为EfficientNet-B4优化的测试脚本
+# test_efficientnet_b4.py - EfficientNet-B4增强版测试脚本
 import torch
 import torch.nn as nn
 import argparse
@@ -13,7 +13,7 @@ import seaborn as sns
 
 # 导入模块
 from network.MainNet import create_model
-from network.data import SingleInputDataset, TestDataset, TTADataset
+from network.data import SingleInputDataset, TestDataset
 from network.utils import cal_metrics
 from torchvision import transforms
 
@@ -28,7 +28,7 @@ class EfficientNetB4Tester:
         
     def setup_model(self):
         """设置模型"""
-        print(f"Setting up {self.args.model_type} SFI-EfficientNet-B4...")
+        print(f"Setting up EfficientNet-B4 Enhanced ({self.args.model_type})...")
         
         # 创建模型
         self.model = create_model(
@@ -97,8 +97,8 @@ class EfficientNetB4Tester:
         if not os.path.exists(self.args.test_txt_path):
             raise FileNotFoundError(f"Test data not found: {self.args.test_txt_path}")
         
-        # 创建测试变换 (EfficientNet-B4推荐380x380)
-        image_size = 380
+        # 使用与训练一致的图像尺寸 224x224
+        image_size = 224
         test_transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
@@ -118,22 +118,48 @@ class EfficientNetB4Tester:
             pin_memory=True
         )
         
-        # TTA数据加载器（如果启用）
+        # 如果启用TTA，创建TTA变换
         if self.args.use_tta:
-            self.tta_dataset = TTADataset(
-                txt_path=self.args.test_txt_path,
-                backbone='efficientnet',
-                backbone_config='b4'
-            )
-            self.tta_loader = DataLoader(
-                self.tta_dataset,
-                batch_size=8,  # TTA使用较小的batch size
-                shuffle=False,
-                num_workers=4
-            )
-            print(f"TTA enabled with {len(self.tta_dataset)} samples")
+            self.tta_transforms = self.create_tta_transforms(image_size)
+            print(f"TTA enabled with {len(self.tta_transforms)} augmentations")
         
         print(f"Test data loaded: {len(test_dataset)} samples")
+    
+    def create_tta_transforms(self, image_size):
+        """创建TTA变换"""
+        base_transform = [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ]
+        
+        tta_transforms = [
+            # 原始图像
+            transforms.Compose(base_transform),
+            # 水平翻转
+            transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomHorizontalFlip(p=1.0),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ]),
+            # 轻微旋转
+            transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomRotation(5),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ]),
+            # 多尺度测试
+            transforms.Compose([
+                transforms.Resize((int(image_size * 1.1), int(image_size * 1.1))),
+                transforms.CenterCrop((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ]),
+        ]
+        
+        return tta_transforms
     
     def test_standard(self):
         """标准测试"""
@@ -187,17 +213,27 @@ class EfficientNetB4Tester:
         total = 0
         
         with torch.no_grad():
-            for batch_idx, (augmented_images, labels) in enumerate(self.tta_loader):
+            for batch_idx, (images, labels) in enumerate(self.test_loader):
                 labels = labels.to(self.device)
                 
-                # 对每个增强版本进行预测
+                # 对每个样本应用不同的TTA变换
                 tta_outputs = []
-                for aug_imgs in augmented_images:
-                    aug_imgs = aug_imgs.to(self.device)
-                    outputs = self.model(aug_imgs)
+                
+                for tta_transform in self.tta_transforms:
+                    # 对batch中每个图像应用TTA变换
+                    augmented_batch = []
+                    for i in range(images.size(0)):
+                        # 转换为PIL图像并应用变换
+                        img_pil = transforms.ToPILImage()(images[i])
+                        aug_img = tta_transform(img_pil)
+                        augmented_batch.append(aug_img)
+                    
+                    # 重新组成batch
+                    aug_batch = torch.stack(augmented_batch).to(self.device)
+                    outputs = self.model(aug_batch)
                     tta_outputs.append(outputs)
                 
-                # 平均所有增强版本的输出
+                # 平均所有TTA输出
                 avg_outputs = torch.mean(torch.stack(tta_outputs), dim=0)
                 
                 # 预测
@@ -214,7 +250,7 @@ class EfficientNetB4Tester:
                 
                 if batch_idx % 50 == 0:
                     current_acc = correct / total if total > 0 else 0
-                    print(f"TTA Batch [{batch_idx:4d}/{len(self.tta_loader)}] Acc: {current_acc:.2%}")
+                    print(f"TTA Batch [{batch_idx:4d}/{len(self.test_loader)}] Acc: {current_acc:.2%}")
         
         return self.calculate_metrics(all_labels, all_probs, all_preds, correct, total)
     
@@ -274,18 +310,23 @@ class EfficientNetB4Tester:
     def save_results(self, results, suffix=""):
         """保存测试结果"""
         output_dir = os.path.dirname(self.args.model_path)
+        if not output_dir:
+            output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # 保存文本结果
         result_file = os.path.join(output_dir, f'test_results{suffix}.txt')
         with open(result_file, 'w') as f:
-            f.write(f"SFI-EfficientNet-B4 Test Results\n")
+            f.write(f"EfficientNet-B4 Enhanced Test Results\n")
             f.write(f"{'='*40}\n")
             f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Model: {self.args.model_type}\n")
             f.write(f"Model path: {self.args.model_path}\n")
             f.write(f"Test data: {self.args.test_txt_path}\n")
             f.write(f"Use TTA: {self.args.use_tta}\n")
+            f.write(f"Enhancement modules: AMSFE={self.args.enable_amsfe}, CLFPF={self.args.enable_clfpf}, SALGA={self.args.enable_salga}\n")
             f.write(f"\nResults:\n")
             f.write(f"Accuracy: {results['accuracy']:.4f}\n")
             
@@ -317,6 +358,9 @@ class EfficientNetB4Tester:
             return
         
         output_dir = os.path.dirname(self.args.model_path)
+        if not output_dir:
+            output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
         
         # 创建子图
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
@@ -381,7 +425,7 @@ class EfficientNetB4Tester:
     
     def run_test(self):
         """运行测试"""
-        print(f"\n🚀 Testing SFI-EfficientNet-B4 ({self.args.model_type})")
+        print(f"\n🚀 Testing EfficientNet-B4 Enhanced ({self.args.model_type})")
         print("="*60)
         
         # 标准测试
@@ -413,14 +457,14 @@ class EfficientNetB4Tester:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SFI-EfficientNet-B4 Testing')
+    parser = argparse.ArgumentParser(description='EfficientNet-B4 Enhanced Testing')
     
     # 基本参数
     parser.add_argument('--test_txt_path', type=str, 
                        default='/home/zqc/FaceForensics++/c23/test.txt',
                        help='Test data txt path')
     parser.add_argument('--model_path', type=str, 
-                       default='./output/sfi-efficientnet-b4-enhanced/best.pkl',
+                       default='./output/efficientnet-b4-enhanced/best.pkl',
                        help='Path to trained model')
     parser.add_argument('--batch_size', type=int, default=32,
                        help='Batch size for testing')
@@ -444,11 +488,12 @@ def main():
     
     args = parser.parse_args()
     
-    print("🧪 SFI-EfficientNet-B4 Testing")
+    print("🧪 EfficientNet-B4 Enhanced Testing")
     print("="*40)
     print(f"Model: {args.model_type}")
     print(f"Model path: {args.model_path}")
     print(f"Test data: {args.test_txt_path}")
+    print(f"Enhancement modules: AMSFE={args.enable_amsfe}, CLFPF={args.enable_clfpf}, SALGA={args.enable_salga}")
     print(f"Use TTA: {args.use_tta}")
     print("="*40)
     

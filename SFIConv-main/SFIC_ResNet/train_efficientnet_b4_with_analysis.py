@@ -1,4 +1,4 @@
-# train_efficientnet_b4.py - 优化的EfficientNet-B4训练脚本
+# train_efficientnet_b4_with_analysis.py - 带模型复杂度分析的训练脚本
 import os
 import torch
 import torch.nn as nn
@@ -20,10 +20,13 @@ from network.data import SingleInputDataset
 from network.utils import setup_seed, cal_metrics
 from torchvision import transforms
 
+# 导入模型分析工具
+from model_complexity_analyzer import ModelComplexityAnalyzer, quick_model_analysis
+
 # 设置环境
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 
-class EfficientNetB4Trainer:
+class EfficientNetB4TrainerWithAnalysis:
     def __init__(self, args):
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -34,6 +37,7 @@ class EfficientNetB4Trainer:
         
         # 初始化
         self.setup_model()
+        self.analyze_model_complexity()  # 新增：模型复杂度分析
         self.setup_data()
         self.setup_optimizer()
         self.setup_logging()
@@ -44,12 +48,12 @@ class EfficientNetB4Trainer:
         
         # 创建增强版EfficientNet-B4模型
         self.model = create_model(
-            model_type='enhanced',  # 使用增强版
+            model_type='enhanced',
             num_classes=self.args.num_classes,
             drop_rate=self.args.drop_rate,
-            enable_amsfe=True,  # 启用AMSFE
-            enable_clfpf=True,  # 启用CLFPF
-            enable_salga=True   # 启用SALGA
+            enable_amsfe=True,
+            enable_clfpf=True,
+            enable_salga=True
         )
         
         # 多GPU支持
@@ -59,40 +63,203 @@ class EfficientNetB4Trainer:
             
         self.model = self.model.to(self.device)
         
-        # 统计参数量
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"✅ Model setup completed")
         
-        print(f"Model: EfficientNet-B4 Enhanced (AMSFE + CLFPF + SALGA)")
-        print(f"Total parameters: {total_params:,}")
-        print(f"Trainable parameters: {trainable_params:,}")
-        print(f"Model size: {total_params * 4 / 1024 / 1024:.2f} MB")
+    def analyze_model_complexity(self):
+        """分析模型复杂度"""
+        print(f"\n{'='*80}")
+        print(f"🔬 PRE-TRAINING MODEL COMPLEXITY ANALYSIS")
+        print(f"{'='*80}")
         
-        # 测试前向传播
-        self._test_forward_pass()
+        # 创建分析器
+        analyzer = ModelComplexityAnalyzer(device=self.device)
         
-    def _test_forward_pass(self):
-        """测试前向传播"""
-        print("Testing forward pass...")
-        try:
-            test_input = torch.randn(2, 3, 224, 224).to(self.device)
-            self.model.eval()
-            with torch.no_grad():
-                test_output = self.model(test_input)
-            self.model.train()
-            print(f"✅ Forward pass successful! Output shape: {test_output.shape}")
-        except Exception as e:
-            print(f"❌ Forward pass failed: {e}")
-            raise e
+        # 分析不同配置的模型进行对比
+        print(f"\n📊 ANALYZING DIFFERENT MODEL CONFIGURATIONS:")
+        print(f"{'-'*80}")
+        
+        model_configs = [
+            {
+                'name': 'Baseline EfficientNet-B4',
+                'model': create_model(model_type='standard', num_classes=2, drop_rate=0.0)
+            },
+            {
+                'name': 'EfficientNet-B4 + AMSFE',
+                'model': create_model(model_type='enhanced', num_classes=2, drop_rate=0.0,
+                                    enable_amsfe=True, enable_clfpf=False, enable_salga=False)
+            },
+            {
+                'name': 'EfficientNet-B4 + AMSFE + CLFPF',
+                'model': create_model(model_type='enhanced', num_classes=2, drop_rate=0.0,
+                                    enable_amsfe=True, enable_clfpf=True, enable_salga=False)
+            },
+            {
+                'name': 'Our Full Model (All Modules)',
+                'model': create_model(model_type='enhanced', num_classes=2, drop_rate=0.0,
+                                    enable_amsfe=True, enable_clfpf=True, enable_salga=True)
+            }
+        ]
+        
+        # 对比分析表格
+        print(f"\n{'Model Configuration':<40} {'Params(M)':<12} {'FLOPs(G)':<12} {'Size(MB)':<12} {'Time(ms)':<12}")
+        print(f"{'-'*100}")
+        
+        results = {}
+        for config in model_configs:
+            try:
+                model = config['model'].to(self.device)
+                result = quick_model_analysis(model, config['name'])
+                results[config['name']] = result
+                
+                # 格式化输出
+                params_m = result['params'] / 1e6
+                flops_g = result['flops'] / 1e9 if result['flops'] > 0 else 0
+                size_mb = result['size_mb']
+                time_ms = result['inference_time_ms']
+                
+                print(f"{config['name']:<40} {params_m:<12.1f} {flops_g:<12.1f} {size_mb:<12.1f} {time_ms:<12.1f}")
+                
+            except Exception as e:
+                print(f"❌ Error analyzing {config['name']}: {e}")
+        
+        # 详细分析我们的完整模型
+        print(f"\n{'='*80}")
+        print(f"🎯 DETAILED ANALYSIS OF OUR ENHANCED MODEL")
+        print(f"{'='*80}")
+        
+        # 获取实际训练模型（可能包含DataParallel）
+        actual_model = self.model.module if hasattr(self.model, 'module') else self.model
+        
+        # 进行详细分析
+        detailed_result = analyzer.analyze_model_detailed(
+            actual_model, 
+            input_size=(1, 3, 224, 224),
+            model_name="Enhanced EfficientNet-B4 (Training Model)"
+        )
+        
+        # 与基线模型对比开销分析
+        if len(results) >= 2:
+            baseline_name = 'Baseline EfficientNet-B4'
+            our_name = 'Our Full Model (All Modules)'
+            
+            if baseline_name in results and our_name in results:
+                baseline = results[baseline_name]
+                ours = results[our_name]
+                
+                print(f"\n{'='*80}")
+                print(f"📈 ENHANCEMENT MODULES OVERHEAD ANALYSIS")
+                print(f"{'='*80}")
+                
+                param_overhead = (ours['params'] - baseline['params']) / baseline['params'] * 100
+                flop_overhead = (ours['flops'] - baseline['flops']) / baseline['flops'] * 100 if baseline['flops'] > 0 else 0
+                size_overhead = (ours['size_mb'] - baseline['size_mb']) / baseline['size_mb'] * 100
+                time_overhead = (ours['inference_time_ms'] - baseline['inference_time_ms']) / baseline['inference_time_ms'] * 100
+                
+                print(f"Enhancement Modules Add:")
+                print(f"  📊 Parameters:    +{(ours['params'] - baseline['params']):,} (+{param_overhead:.1f}%)")
+                print(f"  ⚡ FLOPs:         +{(ours['flops'] - baseline['flops'])/1e9:.1f}G (+{flop_overhead:.1f}%)")
+                print(f"  💾 Model Size:    +{(ours['size_mb'] - baseline['size_mb']):.1f}MB (+{size_overhead:.1f}%)")
+                print(f"  🚀 Time Overhead: +{(ours['inference_time_ms'] - baseline['inference_time_ms']):.1f}ms (+{time_overhead:.1f}%)")
+                
+                # 效率评估
+                if param_overhead > 0:
+                    efficiency_score = 100 / (1 + param_overhead/100 + time_overhead/100)
+                    print(f"  💡 Efficiency Score: {efficiency_score:.1f}/100 (higher is better)")
+                
+                # 性价比分析
+                print(f"\n📊 COST-BENEFIT ANALYSIS:")
+                print(f"  Each 1% parameter increase costs:")
+                if param_overhead > 0:
+                    flop_cost_per_param = flop_overhead / param_overhead
+                    time_cost_per_param = time_overhead / param_overhead
+                    print(f"    - {flop_cost_per_param:.2f}% FLOPs increase")
+                    print(f"    - {time_cost_per_param:.2f}% time increase")
+        
+        # 保存分析结果
+        self.save_complexity_analysis(results, detailed_result)
+        
+        # 内存使用估算
+        self.estimate_memory_usage(detailed_result)
+        
+        print(f"\n{'='*80}")
+        print(f"✅ MODEL COMPLEXITY ANALYSIS COMPLETED")
+        print(f"{'='*80}")
+        
+        return detailed_result
+    
+    def save_complexity_analysis(self, results, detailed_result):
+        """保存复杂度分析结果"""
+        analysis_data = {
+            'timestamp': datetime.now().isoformat(),
+            'model_comparison': results,
+            'detailed_analysis': {
+                'total_params': detailed_result['parameters']['total_params'],
+                'trainable_params': detailed_result['parameters']['trainable_params'],
+                'model_size_mb': detailed_result['model_size']['total_size_mb'],
+                'flops': detailed_result['thop_analysis']['flops'] if detailed_result['thop_analysis'] else 0,
+                'inference_time_ms': detailed_result['timing']['avg_inference_time_ms'],
+                'fps': detailed_result['timing']['fps']
+            }
+        }
+        
+        # 保存到输出目录
+        analysis_file = os.path.join('./output', self.args.name, 'model_complexity_analysis.json')
+        os.makedirs(os.path.dirname(analysis_file), exist_ok=True)
+        
+        with open(analysis_file, 'w') as f:
+            json.dump(analysis_data, f, indent=2)
+        
+        print(f"📁 Complexity analysis saved to: {analysis_file}")
+    
+    def estimate_memory_usage(self, detailed_result):
+        """估算训练时内存使用"""
+        print(f"\n🧠 MEMORY USAGE ESTIMATION:")
+        print(f"{'-'*50}")
+        
+        # 模型参数内存
+        model_memory = detailed_result['model_size']['total_size_mb']
+        
+        # 梯度内存（与参数相同）
+        gradient_memory = model_memory
+        
+        # 优化器状态内存（AdamW需要2倍参数内存）
+        optimizer_memory = model_memory * 2
+        
+        # 激活内存估算（基于FLOPs和batch size）
+        if detailed_result['thop_analysis']:
+            # 粗略估算：FLOPs / 1e9 * batch_size * 4 bytes
+            activation_memory = detailed_result['thop_analysis']['flops'] / 1e9 * self.args.batch_size * 4 / 1024 / 1024
+        else:
+            activation_memory = 200  # 默认估算
+        
+        total_memory = model_memory + gradient_memory + optimizer_memory + activation_memory
+        
+        print(f"Model Parameters:     {model_memory:.1f} MB")
+        print(f"Gradients:           {gradient_memory:.1f} MB")
+        print(f"Optimizer States:    {optimizer_memory:.1f} MB")
+        print(f"Activations (est.):  {activation_memory:.1f} MB")
+        print(f"Total Training:      {total_memory:.1f} MB (~{total_memory/1024:.1f} GB)")
+        
+        # GPU内存检查
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            memory_usage_pct = total_memory / 1024 / gpu_memory * 100
+            print(f"GPU Memory:          {gpu_memory:.1f} GB")
+            print(f"Estimated Usage:     {memory_usage_pct:.1f}% of GPU memory")
+            
+            if memory_usage_pct > 90:
+                print(f"⚠️  WARNING: High memory usage! Consider reducing batch size.")
+            elif memory_usage_pct > 70:
+                print(f"⚠️  CAUTION: Moderate memory usage. Monitor during training.")
+            else:
+                print(f"✅ Good: Memory usage within safe range.")
         
     def setup_data(self):
         """设置数据加载器"""
         print("Setting up data loaders...")
         
-        # 使用224x224作为标准输入尺寸
         image_size = 224
         
-        # 优化的数据增强策略
         train_transform = transforms.Compose([
             transforms.Resize((int(image_size * 1.14), int(image_size * 1.14))),
             transforms.RandomCrop((image_size, image_size)),
@@ -176,6 +343,11 @@ class EfficientNetB4Trainer:
             else:
                 pretrained_params.append(param)
         
+        print(f"Parameter groups:")
+        print(f"  Pretrained backbone: {sum(p.numel() for p in pretrained_params):,} params")
+        print(f"  Enhancement modules: {sum(p.numel() for p in enhancement_params):,} params")
+        print(f"  Classifier: {sum(p.numel() for p in classifier_params):,} params")
+        
         # 使用差分学习率
         param_groups = [
             {'params': pretrained_params, 'lr': self.args.lr * 0.1, 'weight_decay': self.args.weight_decay},
@@ -193,7 +365,7 @@ class EfficientNetB4Trainer:
         
         # 余弦退火调度器 + 预热
         total_steps = len(self.train_loader) * self.args.epochs
-        warmup_steps = len(self.train_loader) * 3  # 前3个epoch预热
+        warmup_steps = len(self.train_loader) * 3
         
         def lr_lambda(current_step):
             if current_step < warmup_steps:
@@ -285,10 +457,19 @@ class EfficientNetB4Trainer:
                 current_acc = 100. * correct / total
                 current_lr = self.optimizer.param_groups[0]['lr']
                 
+                # 内存使用监控
+                if torch.cuda.is_available():
+                    memory_used = torch.cuda.memory_allocated() / 1024**3
+                    memory_cached = torch.cuda.memory_reserved() / 1024**3
+                    memory_info = f"GPU: {memory_used:.1f}GB/{memory_cached:.1f}GB"
+                else:
+                    memory_info = ""
+                
                 self.log_message(
                     f"Epoch[{epoch+1:2d}/{self.args.epochs}] "
                     f"Batch[{batch_idx:4d}/{len(self.train_loader)}] "
-                    f"Loss:{current_loss:.4f} Acc:{current_acc:.2f}% LR:{current_lr:.6f}"
+                    f"Loss:{current_loss:.4f} Acc:{current_acc:.2f}% "
+                    f"LR:{current_lr:.6f} {memory_info}"
                 )
         
         epoch_loss = running_loss / len(self.train_loader)
@@ -461,10 +642,10 @@ class EfficientNetB4Trainer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='EfficientNet-B4 Enhanced Training')
+    parser = argparse.ArgumentParser(description='EfficientNet-B4 Enhanced Training with Complexity Analysis')
     
     # 基本参数
-    parser.add_argument('--name', type=str, default='efficientnet-b4-enhanced',
+    parser.add_argument('--name', type=str, default='efficientnet-b4-enhanced-analyzed',
                        help='Experiment name')
     parser.add_argument('--train_txt_path', type=str, 
                        default='/home/zqc/FaceForensics++/c23/train.txt',
@@ -473,8 +654,8 @@ def main():
                        default='/home/zqc/FaceForensics++/c23/val.txt',
                        help='Validation data txt path')
     parser.add_argument('--batch_size', type=int, default=32,
-                       help='Batch size (32 for better stability)')
-    parser.add_argument('--epochs', type=int, default=20,
+                       help='Batch size')
+    parser.add_argument('--epochs', type=int, default=30,
                        help='Number of epochs')
     parser.add_argument('--num_classes', type=int, default=2,
                        help='Number of classes')
@@ -502,17 +683,17 @@ def main():
     
     args = parser.parse_args()
     
-    print("🚀 EfficientNet-B4 Enhanced Training")
-    print("="*50)
+    print("🚀 EfficientNet-B4 Enhanced Training with Complexity Analysis")
+    print("="*70)
     print(f"Model: EfficientNet-B4 + AMSFE + CLFPF + SALGA")
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.lr}")
     print(f"Epochs: {args.epochs}")
     print(f"Mixed precision: {args.use_amp}")
-    print("="*50)
+    print("="*70)
     
     try:
-        trainer = EfficientNetB4Trainer(args)
+        trainer = EfficientNetB4TrainerWithAnalysis(args)
         best_metrics = trainer.train()
         
         print("\n🎉 Training completed successfully!")
