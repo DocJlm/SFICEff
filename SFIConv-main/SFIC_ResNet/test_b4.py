@@ -461,10 +461,10 @@ def main():
     
     # 基本参数
     parser.add_argument('--test_txt_path', type=str, 
-                       default='/home/zqc/WDF/test.txt',
+                       default='/home/zqc/FaceForensics++/c23/test.txt',
                        help='Test data txt path')
     parser.add_argument('--model_path', type=str, 
-                       default='./output/efficientnet-b4-enhanced/best.pkl',
+                       default='./output/baseline_baseline/best.pkl',
                        help='Path to trained model')
     parser.add_argument('--batch_size', type=int, default=32,
                        help='Batch size for testing')
