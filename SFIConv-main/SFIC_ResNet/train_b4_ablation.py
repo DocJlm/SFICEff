@@ -523,11 +523,11 @@ def main():
                        help='Dropout rate')
     
     # 消融实验参数（关键新增）
-    parser.add_argument('--enable_amsfe', action='store_true', default=False,
+    parser.add_argument('--enable-amsfe', action='store_true', default=False,
                        help='Enable AMSFE module')
-    parser.add_argument('--enable_clfpf', action='store_true', default=False,
+    parser.add_argument('--enable-clfpf', action='store_true', default=False,
                        help='Enable CLFPF module')
-    parser.add_argument('--enable_salga', action='store_true', default=False,
+    parser.add_argument('--enable-salga', action='store_true', default=False,
                        help='Enable SALGA module')
     
     # 训练参数
